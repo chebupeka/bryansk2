@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Честные Числа — Прозрачный ГСЧ</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <meta name="description" content="Рабочий прототип нестандартного генератора случайных чисел с прозрачной визуализацией энтропии и верификацией воспроизводимости." />
+  <style>
+    /* Небольшие доработки поверх Tailwind */
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .grid-auto { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .scrollbar-thin::-webkit-scrollbar { height: 6px; width: 6px; }
+    .scrollbar-thin::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 999px; }
+    .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+    canvas { image-rendering: pixelated; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100">
+  <header class="sticky top-0 z-40 backdrop-blur supports-[backdrop-filter]:bg-slate-950/70 border-b border-slate-800">
+    <div class="max-w-6xl mx-auto px-4 py-4 flex items-center gap-4">
+      <div class="w-9 h-9 rounded-2xl bg-gradient-to-br from-emerald-400 to-cyan-500"></div>
+      <div>
+        <h1 class="text-xl font-bold tracking-tight">Честные Числа</h1>
+        <p class="text-xs text-slate-400">Прозрачный генератор случайных чисел с верифицируемой честностью</p>
+      </div>
+      <div class="ml-auto flex items-center gap-3">
+        <button id="btnStartEntropy" class="px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-400/30 hover:bg-emerald-500/20 transition text-emerald-300 text-sm">Запустить сбор энтропии</button>
+        <button id="btnStopEntropy" class="px-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 hover:bg-slate-700 transition text-slate-300 text-sm" disabled>Остановить</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-6xl mx-auto px-4 py-6 space-y-6">
+    <!-- Геро-блок -->
+    <section class="grid md:grid-cols-2 gap-6">
+      <div class="space-y-3">
+        <h2 class="text-2xl font-semibold">Нестандартные источники энтропии + полная прозрачность</h2>
+        <p class="text-slate-300">Прототип GСЧ объединяет шум микрофона*, движения курсора/устройства, тайминговый <span class="mono">performance.now()</span> джиттер, дрейф часов <span class="mono">AudioContext</span> и системный <span class="mono">crypto.getRandomValues</span> в единый пул битов. Визуализации показывают вклад каждого источника, текущую оценку энтропии и хэш-состояние пула.</p>
+        <p class="text-xs text-slate-500">*Микрофон используется только с вашего разрешения и не отправляется никуда — всё локально.</p>
+        <div class="flex gap-3">
+          <button id="btnWarmup" class="px-4 py-2 rounded-2xl bg-cyan-600 hover:bg-cyan-500 transition">Быстрый разогрев</button>
+          <button id="btnCommit" class="px-4 py-2 rounded-2xl bg-emerald-600 hover:bg-emerald-500 transition">Зафиксировать коммит</button>
+          <button id="btnReveal" class="px-4 py-2 rounded-2xl bg-amber-600 hover:bg-amber-500 transition" disabled>Ревил</button>
+        </div>
+        <p id="commitInfo" class="mono text-xs text-slate-400 break-all"></p>
+      </div>
+      <div class="rounded-3xl border border-slate-800 bg-slate-900/60 p-4">
+        <h3 class="font-semibold mb-2">Онлайн-визуализация пула</h3>
+        <div class="grid grid-cols-3 gap-3 text-center text-xs">
+          <div class="rounded-2xl bg-slate-800 p-3">
+            <div class="text-slate-400">Оценка энтропии</div>
+            <div id="entropyBits" class="text-2xl font-bold">0 б.</div>
+          </div>
+          <div class="rounded-2xl bg-slate-800 p-3">
+            <div class="text-slate-400">Байт в пуле</div>
+            <div id="poolBytes" class="text-2xl font-bold">0</div>
+          </div>
+          <div class="rounded-2xl bg-slate-800 p-3">
+            <div class="text-slate-400">Хэш пула (SHA-256)</div>
+            <div id="poolHash" class="mono text-[10px] break-all">—</div>
+          </div>
+        </div>
+        <div class="mt-4">
+          <div class="flex items-center justify-between text-xs text-slate-400 mb-1"><span>Вклад источников</span><span id="sourceTotal">0</span></div>
+          <div class="flex gap-2 overflow-x-auto scrollbar-thin" id="sourcesStrip"></div>
+        </div>
+        <div class="mt-4">
+          <canvas id="spark" height="64" class="w-full rounded-xl border border-slate-800 bg-slate-950"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- Генератор -->
+    <section class="rounded-3xl border border-slate-800 bg-slate-900/60 p-4">
+      <div class="flex items-center gap-3">
+        <h3 class="font-semibold text-lg">Генерация чисел</h3>
+        <span class="text-xs text-slate-400">H-DRBG (SHA-256 counter mode) с публичной верификацией</span>
+      </div>
+      <div class="grid grid-auto gap-4 mt-3">
+        <label class="block">Диапазон (включительно)
+          <div class="flex gap-2 mt-1">
+            <input id="minVal" type="number" value="1" class="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700" />
+            <input id="maxVal" type="number" value="49" class="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700" />
+          </div>
+        </label>
+        <label class="block">Сколько чисел
+          <input id="countVal" type="number" value="6" min="1" max="1000" class="w-full mt-1 px-3 py-2 rounded-xl bg-slate-800 border border-slate-700" />
+        </label>
+        <label class="block">Пользовательская соль (необязательно)
+          <input id="userSalt" type="text" placeholder="например, MY-SEED-ALIAS" class="w-full mt-1 px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 mono" />
+        </label>
+        <div class="flex gap-3 items-end">
+          <button id="btnGenerate" class="px-4 py-2 rounded-2xl bg-emerald-600 hover:bg-emerald-500 transition">Сгенерировать</button>
+          <button id="btnDownloadProof" class="px-4 py-2 rounded-2xl bg-slate-800 border border-slate-700 hover:bg-slate-700 transition">Скачать протокол</button>
+          <span class="text-xs text-slate-400">Коммит ➜ Ревил позволяют заранее зафиксировать сид и проверить честность выдачи.</span>
+        </div>
+      </div>
+      <div class="mt-4 grid md:grid-cols-2 gap-4">
+        <div class="rounded-2xl bg-slate-950 p-4 border border-slate-800">
+          <h4 class="font-semibold">Результаты</h4>
+          <div id="results" class="mt-2 flex flex-wrap gap-2 text-lg"></div>
+        </div>
+        <div class="rounded-2xl bg-slate-950 p-4 border border-slate-800">
+          <h4 class="font-semibold">Доказуемая честность</h4>
+          <div class="text-xs text-slate-400">Коммит: <span id="commitHash" class="mono break-all">—</span></div>
+          <div class="text-xs text-slate-400 mt-1">Ревил (сид): <span id="revealSeed" class="mono break-all">—</span></div>
+          <div class="text-xs text-slate-400 mt-1">Проверка: SHA-256(сид) = коммит? <span id="verifyStatus" class="font-semibold">—</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Информация -->
+    <section class="rounded-3xl border border-slate-800 bg-slate-900/60 p-4">
+      <h3 class="font-semibold text-lg">Как это работает</h3>
+      <ol class="list-decimal ml-5 mt-2 space-y-1 text-slate-300">
+        <li>Мы собираем шум из нескольких источников: микрофон (с вашего разрешения), движения мыши/тач, джиттер таймеров, датчики устройства (если поддерживаются), системный крипто-рандом.</li>
+        <li>Каждое событие кодируется, оценивается по энтропии (консервативно), миксится в пул через SHA-256 с солью и счётчиком.</li>
+        <li>Перед генерацией публикуется коммит — <span class="mono">SHA-256(seed)</span>. После генерации мы раскрываем сид (ревил). Любой может проверить соответствие.</li>
+        <li>Псевдо-ГСЧ: <strong>Hash-DRBG</strong> на базе SHA-256 в счётном режиме: <span class="mono">state = SHA-256(state || counter)</span>; выход — байты из хэшей.</li>
+        <li>Протокол (JSON) можно скачать для аудита и повторной проверки результатов.</li>
+      </ol>
+    </section>
+  </main>
+
+  <footer class="max-w-6xl mx-auto px-4 pb-8 text-xs text-slate-500">
+    Сделано как прототип «прозрачного ГСЧ». Все вычисления выполняются локально в вашем браузере.
+  </footer>
+
+  <script>
+    // ==============================
+    // УТИЛИТЫ
+    // ==============================
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+    const toHex = (buf) => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+    const fromHex = (hex) => new Uint8Array(hex.match(/.{1,2}/g).map(h => parseInt(h, 16))).buffer;
+
+    async function sha256(bytes) {
+      return await crypto.subtle.digest('SHA-256', bytes);
+    }
+
+    function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
+
+    function saveFile(name, content) {
+      const blob = new Blob([content], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = name; a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    // ==============================
+    // ПУЛ ЭНТРОПИИ
+    // ==============================
+    const pool = {
+      bytes: new Uint8Array(0),
+      bitsEstimate: 0,
+      events: 0,
+      sources: new Map(), // name -> {bits, count}
+      counter: 0,
+      async mix(label, dataBytes, estBits = 0) {
+        // Консервативная оценка: допускаем, что лишь часть данных непредсказуема
+        this.bitsEstimate = Math.min(1e9, this.bitsEstimate + Math.max(0, estBits|0));
+        const salt = enc.encode(label + '|' + (this.counter++));
+        const current = this.bytes;
+        const concatenated = new Uint8Array(current.length + dataBytes.length + salt.length);
+        concatenated.set(current, 0);
+        concatenated.set(dataBytes, current.length);
+        concatenated.set(salt, current.length + dataBytes.length);
+        const h = new Uint8Array(await sha256(concatenated));
+        this.bytes = h; // держим фиксированный размер 32 байта — как у Linux getrandom pool compress
+        this.events++;
+        const src = this.sources.get(label) || { bits: 0, count: 0 };
+        src.bits += Math.max(0, estBits|0); src.count += 1; this.sources.set(label, src);
+        ui.updatePool(this);
+        ui.plotSpark(h[0]);
+      },
+      async mixRandomValues() {
+        const tmp = new Uint8Array(64);
+        crypto.getRandomValues(tmp);
+        await this.mix('crypto.getRandomValues', tmp, 64); // считаем минимум 64 бита
+      }
+    };
+
+    // ==============================
+    // UI/ВИЗУАЛИЗАЦИЯ
+    // ==============================
+    const ui = {
+      elEntropy: document.getElementById('entropyBits'),
+      elPoolBytes: document.getElementById('poolBytes'),
+      elPoolHash: document.getElementById('poolHash'),
+      elSourcesStrip: document.getElementById('sourcesStrip'),
+      elSourceTotal: document.getElementById('sourceTotal'),
+      spark: document.getElementById('spark'),
+      sparkCtx: null,
+      sparkX: 0,
+      init() {
+        this.sparkCtx = this.spark.getContext('2d');
+        this.sparkCtx.fillStyle = '#020617';
+        this.sparkCtx.fillRect(0,0,this.spark.width,this.spark.height);
+      },
+      updatePool(p) {
+        this.elEntropy.textContent = `${p.bitsEstimate} б.`;
+        this.elPoolBytes.textContent = p.bytes.length;
+        sha256(p.bytes).then(h => this.elPoolHash.textContent = toHex(h));
+        this.renderSources(p.sources);
+      },
+      renderSources(map) {
+        const total = [...map.values()].reduce((a,b)=>a+b.bits,0);
+        this.elSourceTotal.textContent = `${total} б.`;
+        this.elSourcesStrip.innerHTML = '';
+        for (const [name, v] of map.entries()) {
+          const block = document.createElement('div');
+          block.className = 'min-w-[200px] rounded-xl bg-slate-800 p-3 border border-slate-700';
+          block.innerHTML = `<div class="text-xs text-slate-400">${name}</div>
+            <div class="flex items-center justify-between mt-1">
+              <div class="text-sm font-semibold">${v.bits} б.</div>
+              <div class="text-xs text-slate-400">${v.count} эв.</div>
+            </div>
+            <div class="w-full h-2 bg-slate-900 rounded-full mt-2 overflow-hidden">
+              <div class="h-full bg-gradient-to-r from-emerald-400 to-cyan-500" style="width:${clamp((v.bits/256)*100,0,100)}%"></div>
+            </div>`;
+          this.elSourcesStrip.appendChild(block);
+        }
+      },
+      plotSpark(v) {
+        const h = this.spark.height;
+        const ctx = this.sparkCtx;
+        ctx.fillStyle = '#020617';
+        ctx.fillRect(this.sparkX, 0, 2, h);
+        const y = h - (v/255)*h;
+        ctx.fillStyle = '#22d3ee';
+        ctx.fillRect(this.sparkX, y, 2, h - y);
+        this.sparkX = (this.sparkX + 2) % this.spark.width;
+      }
+    };
+
+    ui.init();
+
+    // ==============================
+    // ИСТОЧНИКИ ЭНТРОПИИ
+    // ==============================
+    let mediaStream = null, audioContext = null, analyser = null, micTimer = null, rafId = null;
+    let running = false;
+
+    async function startEntropy() {
+      if (running) return; running = true;
+      // 1) crypto.getRandomValues — сразу
+      await pool.mixRandomValues();
+
+      // 2) Тайминговый джиттер (requestAnimationFrame)
+      let last = performance.now();
+      const rafLoop = async (t) => {
+        if (!running) return; 
+        const delta = t - last; last = t;
+        const view = new DataView(new ArrayBuffer(8)); view.setFloat64(0, delta, true);
+        await pool.mix('raf-jitter', new Uint8Array(view.buffer), 0.5);
+        rafId = requestAnimationFrame(rafLoop);
+      };
+      rafId = requestAnimationFrame(rafLoop);
+
+      // 3) Движения мыши/курсор
+      const onMove = async (e) => {
+        const payload = new Uint8Array(new Float64Array([e.screenX, e.screenY, performance.now()]).buffer);
+        await pool.mix('pointer-move', payload, 0.5);
+      };
+      window.addEventListener('pointermove', onMove);
+
+      // 4) DeviceMotion / DeviceOrientation (если доступно)
+      const onMotion = async (e) => {
+        const ax = e.accelerationIncludingGravity || e.acceleration || {}; 
+        const rot = e.rotationRate || {};
+        const arr = new Float32Array([
+          ax.x||0, ax.y||0, ax.z||0,
+          rot.alpha||0, rot.beta||0, rot.gamma||0,
+          performance.now()
+        ]);
+        await pool.mix('device-motion', new Uint8Array(arr.buffer), 1);
+      };
+      if (window.DeviceMotionEvent) {
+        try {
+          if (typeof DeviceMotionEvent.requestPermission === 'function') {
+            const ok = await DeviceMotionEvent.requestPermission();
+            if (ok === 'granted') window.addEventListener('devicemotion', onMotion);
+          } else {
+            window.addEventListener('devicemotion', onMotion);
+          }
+        } catch(_){}
+      }
+
+      // 5) Микрофон (шум)
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const src = audioContext.createMediaStreamSource(mediaStream);
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 2048;
+        src.connect(analyser);
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        micTimer = setInterval(async () => {
+          analyser.getByteTimeDomainData(data);
+          // Компрессия в 32 байта через SHA-256
+          const h = new Uint8Array(await sha256(data));
+          await pool.mix('microphone-noise', h, 2); // очень консервативно: 2 бита/пакет
+        }, 200);
+      } catch(err) {
+        await pool.mix('microphone-denied', enc.encode(String(err.name||'denied')), 0);
+      }
+
+      // 6) AudioContext clock drift (отклонения таймера аудиоконтекста)
+      let driftLast = audioContext ? audioContext.currentTime : 0;
+      const driftLoop = async () => {
+        if (!running) return;
+        const now = audioContext ? audioContext.currentTime : 0;
+        const drift = now - driftLast; driftLast = now;
+        const view = new DataView(new ArrayBuffer(8)); view.setFloat64(0, drift, true);
+        await pool.mix('audio-clock-drift', new Uint8Array(view.buffer), 0.5);
+        setTimeout(driftLoop, 150 + Math.random()*50);
+      };
+      driftLoop();
+
+      document.getElementById('btnStartEntropy').disabled = true;
+      document.getElementById('btnStopEntropy').disabled = false;
+    }
+
+    async function stopEntropy() {
+      running = false;
+      if (rafId) cancelAnimationFrame(rafId);
+      window.removeEventListener('pointermove', null);
+      if (micTimer) clearInterval(micTimer);
+      if (analyser) analyser.disconnect();
+      if (audioContext) audioContext.close();
+      if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+      document.getElementById('btnStartEntropy').disabled = false;
+      document.getElementById('btnStopEntropy').disabled = true;
+    }
+
+    // ==============================
+    // COMMIT / REVEAL
+    // ==============================
+    let commitHash = null; // ArrayBuffer
+    let revealSeedHex = null;
+
+    async function makeSeed() {
+      // сид из: текущего пула (32b) + случайных значений + timestamp
+      const extra = new Uint8Array(32); crypto.getRandomValues(extra);
+      const ts = new DataView(new ArrayBuffer(8)); ts.setFloat64(0, performance.now(), true);
+      const concat = new Uint8Array(pool.bytes.length + extra.length + 8);
+      concat.set(pool.bytes, 0); concat.set(extra, pool.bytes.length); concat.set(new Uint8Array(ts.buffer), pool.bytes.length + extra.length);
+      const seed = new Uint8Array(await sha256(concat)); // 32 байта
+      return toHex(seed);
+    }
+
+    async function doCommit() {
+      revealSeedHex = await makeSeed();
+      commitHash = await sha256(fromHex(revealSeedHex));
+      document.getElementById('commitHash').textContent = toHex(commitHash);
+      document.getElementById('commitInfo').textContent = `Коммит зафиксирован: ${toHex(commitHash)}. Теперь сгенерируйте и затем выполните ревил.`;
+      document.getElementById('btnReveal').disabled = false;
+    }
+
+    async function doReveal() {
+      if (!revealSeedHex) return;
+      document.getElementById('revealSeed').textContent = revealSeedHex;
+      const check = toHex(await sha256(fromHex(revealSeedHex))) === toHex(commitHash);
+      document.getElementById('verifyStatus').textContent = check ? 'OK' : 'НЕ СОВПАЛО';
+    }
+
+    // ==============================
+    // DRBG НА ОСНОВЕ SHA-256
+    // ==============================
+    async function* hashCtr(bytesSeed, userSaltStr = '') {
+      let state = new Uint8Array(await sha256(bytesSeed));
+      let ctr = 0;
+      const salt = enc.encode(userSaltStr);
+      while (true) {
+        const ctrView = new DataView(new ArrayBuffer(8)); ctrView.setUint32(0, ctr++, true);
+        const inp = new Uint8Array(state.length + 8 + salt.length);
+        inp.set(state, 0); inp.set(new Uint8Array(ctrView.buffer), state.length); inp.set(salt, state.length+8);
+        const out = new Uint8Array(await sha256(inp));
+        state = out;
+        yield out;
+      }
+    }
+
+    function bytesToInt(range, bytes) {
+      // равномерное преобразование через rejection sampling
+      // range = [min, max]
+      const [min, max] = range;
+      const span = BigInt(max - min + 1);
+      const needed = Math.ceil(Number(Math.log2(max - min + 1)) / 8);
+      for (let i = 0; i < bytes.length - needed; i += needed) {
+        let v = 0n;
+        for (let j = 0; j < needed; j++) v = (v << 8n) + BigInt(bytes[i + j]);
+        const limit = (1n << BigInt(needed*8)) - ((1n << BigInt(needed*8)) % span);
+        if (v < limit) return Number(v % span) + min;
+      }
+      return null; // если не хватило удачной выборки
+    }
+
+    async function generateNumbers() {
+      const min = parseInt(document.getElementById('minVal').value, 10);
+      const max = parseInt(document.getElementById('maxVal').value, 10);
+      const count = parseInt(document.getElementById('countVal').value, 10);
+      const userSaltStr = document.getElementById('userSalt').value || '';
+      const resultsEl = document.getElementById('results');
+      resultsEl.innerHTML = '';
+
+      if (!(max >= min)) { alert('Неверный диапазон'); return; }
+      if (count < 1 || count > 10000) { alert('Количество 1..10000'); return; }
+
+      // Сид для DRBG: используем revealSeedHex (если зафиксирован) иначе свежий
+      const seedHex = revealSeedHex || await makeSeed();
+      const seedBytes = new Uint8Array(fromHex(seedHex));
+      const gen = hashCtr(seedBytes, userSaltStr);
+
+      const out = [];
+      while (out.length < count) {
+        const { value: block } = await gen.next();
+        let val = bytesToInt([min, max], block);
+        if (val === null) continue; // повторим с новым блоком
+        out.push(val);
+      }
+
+      // Покажем как «лотерейные шарики»
+      for (const n of out) {
+        const b = document.createElement('div');
+        b.className = 'w-12 h-12 rounded-full bg-gradient-to-br from-emerald-400 to-cyan-500 flex items-center justify-center text-slate-900 font-bold shadow-lg';
+        b.textContent = n;
+        resultsEl.appendChild(b);
+      }
+
+      // Запишем протокол для аудита
+      const protocol = {
+        version: 1,
+        timestamp: new Date().toISOString(),
+        range: { min, max }, count,
+        userSalt: userSaltStr,
+        commit: commitHash ? toHex(commitHash) : null,
+        revealSeedHex: seedHex,
+        poolHash: document.getElementById('poolHash').textContent,
+        entropyBits: pool.bitsEstimate,
+        sources: Object.fromEntries(pool.sources),
+        results: out
+      };
+      window.__lastProtocol = protocol;
+    }
+
+    function downloadProtocol() {
+      if (!window.__lastProtocol) { alert('Сначала выполните генерацию'); return; }
+      saveFile(`honest-rng-${Date.now()}.json`, JSON.stringify(window.__lastProtocol, null, 2));
+    }
+
+    // ==============================
+    // Быстрый разогрев (эмуляция активного пользователя)
+    // ==============================
+    async function warmup() {
+      // несколько быстрых миксов системного рандома + джиттерных значений
+      for (let i = 0; i < 16; i++) {
+        await pool.mixRandomValues();
+        const view = new DataView(new ArrayBuffer(8)); view.setFloat64(0, Math.random() * performance.now(), true);
+        await pool.mix('warmup', new Uint8Array(view.buffer), 0.5);
+      }
+    }
+
+    // ==============================
+    // СВЯЗКА С UI
+    // ==============================
+    document.getElementById('btnStartEntropy').addEventListener('click', startEntropy);
+    document.getElementById('btnStopEntropy').addEventListener('click', stopEntropy);
+    document.getElementById('btnCommit').addEventListener('click', doCommit);
+    document.getElementById('btnReveal').addEventListener('click', doReveal);
+    document.getElementById('btnGenerate').addEventListener('click', generateNumbers);
+    document.getElementById('btnDownloadProof').addEventListener('click', downloadProtocol);
+    document.getElementById('btnWarmup').addEventListener('click', warmup);
+
+    // первичный апдейт
+    ui.updatePool(pool);
+  </script>
+</body>
+</html>
