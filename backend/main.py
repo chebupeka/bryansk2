@@ -7,6 +7,7 @@ import numpy as np
 from scipy.stats import entropy
 import hashlib
 from datetime import datetime
+import secrets
 
 app = FastAPI()
 
@@ -29,58 +30,86 @@ class Generation(Base):
 
 Base.metadata.create_all(bind=engine)
 
+def chaotic_noise_generator(n=100, r=3.99):
+    x = secrets.randbelow(1000000) / 1000000.0
+    sequence = []
+    for _ in range(n):
+        x = r * x * (1 - x)
+        value = int(x * 100) % 100
+        sequence.append(value)
+    return sequence
+
 def calculate_entropy(sequence):
     # Шенноновская энтропия для демонстрации (на дискретных значениях)
     _, counts = np.unique(sequence, return_counts=True)
     probs = counts / len(sequence)
-    return float(entropy(probs, base=2))
+    ent = entropy(probs, base=2)
+    return float(ent)
 
-def chaotic_map_generator(n=100, r=4.0, x0=0.5):
-    # Логистическая карта для хаоса
-    sequence = [x0]
-    for _ in range(n-1):
-        x = r * sequence[-1] * (1 - sequence[-1])
-        sequence.append(x)
-    return [int(x * 1000) % 100 for x in sequence]  # Нормализуем в 0-99
-
-def noise_generator(n=100):
-    # Симулированный шум (numpy random, но для реала используй pyaudio)
-    return np.random.randint(0, 100, n).tolist()
+def chaotic_map_generator(n=100, r=3.99, x0=0.123):
+    sequence = []
+    x = x0
+    for _ in range(n):
+        x = r * x * (1 - x)
+        value = int((x * 100) % 100)
+        sequence.append(value)
+    return sequence
 
 @app.get("/")
-def read_root():
-    return {"Hello": "World"}
+def home():
+    return {"message": "TRNG + Хаос готовы!"}
 
 @app.get("/generate/{source}")
 def generate(source: str, n: int = 100):
     if source == "chaotic":
         seq = chaotic_map_generator(n)
     elif source == "noise":
-        seq = noise_generator(n)
+        seq = chaotic_noise_generator(n)
     else:
-        raise HTTPException(status_code=400, detail="Invalid source")
+        raise HTTPException(status_code=400, detail="Источник: chaotic или noise")
 
     ent = calculate_entropy(seq)
     ts = datetime.now().isoformat()
     hash_val = hashlib.sha256(str(seq).encode()).hexdigest()
 
-    # Сохраняем в DB
     db = SessionLocal()
-    gen = Generation(sequence=seq, entropy_value=ent, timestamp=ts, hash_value=hash_val)
-    db.add(gen)
-    db.commit()
-    db.refresh(gen)
+    try:
+        gen = Generation(
+            sequence=seq,
+            entropy_value=ent,
+            timestamp=ts,
+            hash_value=hash_val,
+        )
+        db.add(gen)
+        db.commit()
+        db.refresh(gen)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
 
-    return {"id": gen.id, "sequence": seq, "entropy": ent, "timestamp": ts, "hash": hash_val}
+    return {
+        "id": gen.id,
+        "sequence": seq,
+        "entropy": ent,
+        "timestamp": ts,
+        "hash": hash_val
+    }
 
 @app.get("/verify/{id}")
 def verify(id: int):
     db = SessionLocal()
-    gen = db.query(Generation).filter(Generation.id == id).first()
-    if not gen:
-        raise HTTPException(status_code=404, detail="Not found")
-    return {"sequence": gen.sequence, "entropy": gen.entropy_value, "timestamp": gen.timestamp, "hash": gen.hash_value}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    try:
+        gen = db.query(Generation).filter(Generation.id == id).first()
+        if not gen:
+            raise HTTPException(status_code=404, detail="Не найдено")
+        return {
+            "id": gen.id,
+            "sequence": gen.sequence,
+            "entropy": gen.entropy_value,
+            "timestamp": gen.timestamp,
+            "hash": gen.hash_value
+        }
+    finally:
+        db.close()
