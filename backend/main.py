@@ -5,7 +5,7 @@ from datetime import datetime
 from scipy.stats import entropy
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, JSON, Float, String
+from sqlalchemy import create_engine, Column, Integer, JSON, Float, String, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from nistrng import pack_sequence, check_eligibility_all_battery, run_all_battery, SP800_22R1A_BATTERY
@@ -14,7 +14,7 @@ app = FastAPI()
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-DATABASE_URL = "postgresql://postgres:gschn_demo?@localhost:5432/gschn_demo"
+DATABASE_URL = "postgresql://postgres:12Hcrqa?@localhost:5432/gschn_demo"
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -26,17 +26,26 @@ class Generation(Base):
     entropy_value = Column(Float)
     timestamp = Column(String)
     hash_value = Column(String)
+    source = Column(String)  # 'chaotic' or 'noise'
+    min_val = Column(Integer)
+    max_val = Column(Integer)
+    allow_duplicates = Column(Boolean)
 
 Base.metadata.create_all(bind=engine)
 
-def chaotic_noise_generator(n=100, r=3.99):
+def chaotic_noise_generator(n=100, r=3.99, min_val=0, max_val=99, allow_duplicates=True):
+    range_size = max_val - min_val + 1
+    if range_size <= 0:
+        raise ValueError("Range size must be positive")
     x = secrets.randbelow(1000000) / 1000000.0
     sequence = []
-    for _ in range(n):
+    for _ in range(n * 2 if not allow_duplicates else n):
         x = r * x * (1 - x)
-        value = int(x * 100) % 100
+        value = int(x * range_size) + min_val
         sequence.append(value)
-    return sequence
+    if not allow_duplicates:
+        sequence = sorted(set(sequence))[:n]
+    return sequence[:n]
 
 def calculate_entropy(sequence):
     _, counts = np.unique(sequence, return_counts=True)
@@ -44,27 +53,38 @@ def calculate_entropy(sequence):
     ent = entropy(probs, base=2)
     return float(ent)
 
-def chaotic_map_generator(n=100, r=3.99, x0=0.123):
+def chaotic_map_generator(n=100, r=3.99, x0=0.123, min_val=0, max_val=99, allow_duplicates=True):
+    range_size = max_val - min_val + 1
+    if range_size <= 0:
+        raise ValueError("Range size must be positive")
     sequence = []
     x = x0
-    for _ in range(n):
+    for _ in range(n * 2 if not allow_duplicates else n):
         x = r * x * (1 - x)
-        value = int((x * 100) % 100)
+        value = int((x * range_size) % range_size) + min_val
         sequence.append(value)
-    return sequence
+    if not allow_duplicates:
+        sequence = sorted(set(sequence))[:n]
+    return sequence[:n]
 
 @app.get("/")
 def home():
     return {"message": "TRNG + Хаос готов"}
 
 @app.get("/generate/{source}")
-def generate(source: str, n: int = 100):
+def generate(source: str, n: int = 100, min_val: int = 0, max_val: int = 99, allow_duplicates: bool = True):
+    if min_val > max_val:
+        raise HTTPException(status_code=400, detail="min_val не может быть > max_val")
     if source == "chaotic":
-        seq = chaotic_map_generator(n)
+        seq = chaotic_map_generator(n, min_val=min_val, max_val=max_val, allow_duplicates=allow_duplicates)
     elif source == "noise":
-        seq = chaotic_noise_generator(n)
+        seq = chaotic_noise_generator(n, min_val=min_val, max_val=max_val, allow_duplicates=allow_duplicates)
     else:
         raise HTTPException(status_code=400, detail="Источник: chaotic или noise")
+
+    # Verify seq in range
+    if not all(min_val <= v <= max_val for v in seq):
+        raise HTTPException(status_code=500, detail="Generated values out of range")
 
     ent = calculate_entropy(seq)
     ts = datetime.now().isoformat()
@@ -77,6 +97,10 @@ def generate(source: str, n: int = 100):
             entropy_value=ent,
             timestamp=ts,
             hash_value=hash_val,
+            source=source,
+            min_val=min_val,
+            max_val=max_val,
+            allow_duplicates=allow_duplicates
         )
         db.add(gen)
         db.commit()
@@ -92,8 +116,33 @@ def generate(source: str, n: int = 100):
         "sequence": seq,
         "entropy": ent,
         "timestamp": ts,
-        "hash": hash_val
+        "hash": hash_val,
+        "generatedSource": gen.source,
+        "generatedMin": gen.min_val,
+        "generatedMax": gen.max_val,
+        "generatedDuplicates": gen.allow_duplicates
     }
+
+@app.get("/check_hash/{hash_val}")
+def check_hash(hash_val: str):
+    db = SessionLocal()
+    try:
+        gen = db.query(Generation).filter(Generation.hash_value == hash_val).first()
+        if not gen:
+            raise HTTPException(status_code=404, detail="Хэш не найден")
+        return {
+            "id": gen.id,
+            "sequence": gen.sequence,
+            "entropy": gen.entropy_value,
+            "timestamp": gen.timestamp,
+            "hash": gen.hash_value,
+            "generatedSource": gen.source,
+            "generatedMin": gen.min_val,
+            "generatedMax": gen.max_val,
+            "generatedDuplicates": gen.allow_duplicates
+        }
+    finally:
+        db.close()
 
 @app.get("/verify/{id}")
 def verify(id: int):
@@ -107,7 +156,11 @@ def verify(id: int):
             "sequence": gen.sequence,
             "entropy": gen.entropy_value,
             "timestamp": gen.timestamp,
-            "hash": gen.hash_value
+            "hash": gen.hash_value,
+            "generatedSource": gen.source,
+            "generatedMin": gen.min_val,
+            "generatedMax": gen.max_val,
+            "generatedDuplicates": gen.allow_duplicates
         }
     finally:
         db.close()
