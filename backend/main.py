@@ -14,7 +14,7 @@ app = FastAPI()
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-DATABASE_URL = "postgresql://postgres:12Hcrqa?@localhost:5433/gschn_demo"
+DATABASE_URL = "postgresql://postgres:gschn_demo?@localhost:5432/gschn_demo"
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
