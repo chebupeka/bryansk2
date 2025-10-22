@@ -23,7 +23,7 @@
     let maxVal = 99;
     let allowDuplicates = true;
     let hashInput = '';  // For hash verification
-    const API = 'http://127.0.0.1:8000';
+    const API = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
     // Reactive validation for sliders
     $: if (minVal > maxVal) maxVal = minVal;
