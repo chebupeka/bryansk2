@@ -1,28 +1,24 @@
-import os
-from dotenv import load_dotenv
-load_dotenv()  # Загружает .env из корня проекта
+import hashlib
+from datetime import datetime
+import logging
 
 import numpy as np
-import hashlib
-import secrets
-from datetime import datetime
-from scipy.stats import entropy
-import logging  # Для debug
-
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, JSON, Float, String, Boolean, text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-from nistrng import pack_sequence, check_eligibility_all_battery, run_all_battery, SP800_22R1A_BATTERY
+from nistrng import pack_sequence, check_eligibility_all_battery, SP800_22R1A_BATTERY, run_all_battery
+from sqlalchemy import text
 
-# Logging setup
+from components.database import engine, SessionLocal
+from components.generations import chaotic_map_generator, chaotic_noise_generator, calculate_entropy
+from components.models import Base, Generation
+from components.nist_service import run_nist_tests
+from components.analyze import analyze_uploaded_sequence
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Debug env
-DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:gschn_demo@localhost:5432/gschn_demo')
-print(f"Loaded env: DATABASE_URL={DATABASE_URL[:50]}...")
+print(f"Loaded DATABASE_URL={engine.url[:50]}...")
 
 app = FastAPI()
 
@@ -34,89 +30,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Engine with pool_pre_ping for connection validation
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,  # Проверяет соединение перед use
-    pool_recycle=300,    # Recycle every 5 min
-    echo=False  # True for SQL debug
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-class Generation(Base):
-    __tablename__ = "generations"
-    id = Column(Integer, primary_key=True, index=True)
-    sequence = Column(JSON)
-    entropy_value = Column(Float)
-    timestamp = Column(String)
-    hash_value = Column(String)
-    source = Column(String)  # 'chaotic' or 'noise'
-    min_val = Column(Integer)
-    max_val = Column(Integer)
-    allow_duplicates = Column(Boolean)
-
-# Create tables
-try:
-    Base.metadata.create_all(bind=engine)
-    logger.info("DB tables created/checked OK")
-except Exception as e:
-    logger.error(f"DB init error (non-fatal): {e}")
-
-# Migration: Add missing columns if table exists but old schema
+# Migration
 db_mig = SessionLocal()
 try:
-    # Check if table exists
+    Base.metadata.create_all(bind=engine)
     result = db_mig.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'generations');"))
     if result.scalar():
-        # Add columns if not exist
         db_mig.execute(text("ALTER TABLE generations ADD COLUMN IF NOT EXISTS source VARCHAR;"))
         db_mig.execute(text("ALTER TABLE generations ADD COLUMN IF NOT EXISTS min_val INTEGER DEFAULT 0;"))
         db_mig.execute(text("ALTER TABLE generations ADD COLUMN IF NOT EXISTS max_val INTEGER DEFAULT 99;"))
         db_mig.execute(text("ALTER TABLE generations ADD COLUMN IF NOT EXISTS allow_duplicates BOOLEAN DEFAULT true;"))
         db_mig.commit()
-        logger.info("Migration: Columns added OK")
-    else:
-        logger.info("No migration needed (table missing)")
+        logger.info("Migration OK")
 except Exception as e:
     db_mig.rollback()
-    logger.error(f"Migration error (non-fatal): {e}. Manual ALTER in pgAdmin if needed.")
+    logger.error(f"Migration error: {e}")
 finally:
     db_mig.close()
-
-def chaotic_noise_generator(n=100, r=3.99, min_val=0, max_val=99, allow_duplicates=True):
-    range_size = max_val - min_val + 1
-    if range_size <= 0:
-        raise ValueError("Range size must be positive")
-    x = secrets.randbelow(1000000) / 1000000.0
-    sequence = []
-    for _ in range(n * 2 if not allow_duplicates else n):
-        x = r * x * (1 - x)
-        value = int(x * range_size) + min_val
-        sequence.append(value)
-    if not allow_duplicates:
-        sequence = sorted(set(sequence))[:n]
-    return sequence[:n]
-
-def calculate_entropy(sequence):
-    _, counts = np.unique(sequence, return_counts=True)
-    probs = counts / len(sequence)
-    ent = entropy(probs, base=2)
-    return float(ent)
-
-def chaotic_map_generator(n=100, r=3.99, x0=0.123, min_val=0, max_val=99, allow_duplicates=True):
-    range_size = max_val - min_val + 1
-    if range_size <= 0:
-        raise ValueError("Range size must be positive")
-    sequence = []
-    x = x0
-    for _ in range(n * 2 if not allow_duplicates else n):
-        x = r * x * (1 - x)
-        value = int((x * range_size) % range_size) + min_val
-        sequence.append(value)
-    if not allow_duplicates:
-        sequence = sorted(set(sequence))[:n]
-    return sequence[:n]
 
 @app.get("/")
 def home():
@@ -125,8 +55,6 @@ def home():
 @app.get("/generate/{source}")
 def generate(source: str, n: int = 100, min_val: int = 0, max_val: int = 99, allow_duplicates: bool = True):
     try:
-        if min_val > max_val:
-            raise HTTPException(status_code=400, detail="min_val не может быть > max_val")
         if source == "chaotic":
             seq = chaotic_map_generator(n, min_val=min_val, max_val=max_val, allow_duplicates=allow_duplicates)
         elif source == "noise":
@@ -134,7 +62,6 @@ def generate(source: str, n: int = 100, min_val: int = 0, max_val: int = 99, all
         else:
             raise HTTPException(status_code=400, detail="Источник: chaotic или noise")
 
-        # Verify seq in range
         if not all(min_val <= v <= max_val for v in seq):
             raise HTTPException(status_code=500, detail="Generated values out of range")
 
@@ -158,7 +85,7 @@ def generate(source: str, n: int = 100, min_val: int = 0, max_val: int = 99, all
         db.refresh(gen)
         db.close()
 
-        logger.info(f"Generated {source}: ID={gen.id}, entropy={ent:.4f}")
+        logger.info(f"Generated {source}: ID={gen.id}")
         return {
             "id": gen.id,
             "sequence": seq,
@@ -171,7 +98,7 @@ def generate(source: str, n: int = 100, min_val: int = 0, max_val: int = 99, all
             "generatedDuplicates": gen.allow_duplicates
         }
     except HTTPException:
-        raise  # Re-raise FastAPI errors
+        raise
     except Exception as e:
         logger.error(f"Generate error: {e}")
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
@@ -259,3 +186,14 @@ def nist_test(id: int):
     except Exception as e:
         logger.error(f"NIST error: {e}")
         raise HTTPException(status_code=500, detail=f"NIST failed: {str(e)}")
+
+# New: Upload analysis endpoint
+@app.post("/analyze")
+async def analyze_upload(file: UploadFile = File(...)):
+    try:
+        result = analyze_uploaded_sequence(file)
+        logger.info(f"Analyzed upload: len={len(result['sequence'])}, entropy={result['user_entropy']:.4f}")
+        return result
+    except Exception as e:
+        logger.error(f"Analyze error: {e}")
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")

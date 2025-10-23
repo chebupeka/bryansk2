@@ -1,16 +1,19 @@
-## Hackaton: RandomTrust - Прозрачный ГСЧ
+## RandomTrust: Прозрачный ГСЧ
+
+### Модули
+- **Backend**: models.py (DB), database.py (engine), generators.py (seq), nist_service.py (тесты), analyze.py (upload).
+- **Frontend**: components/ (Upload.svelte, Analysis.svelte), services/api.ts (fetch).
+
+### Upload-модуль
+1. TXT/CSV: Числа 0-99 по строкам.
+2. POST /analyze — парсит, entropy/NIST, сравнение с эталоном (secrets PRNG).
+3. UI: Загрузка + таблица (user vs ref).
 
 ### Setup
-1. Copy `.env.example` to `.env` and fill secrets (DB pass, API URL).
-2. `./setup_and_run.sh` — auto-install, DB setup, run (logs in *.log).
-3. Local: http://localhost:5173
-4. Server: http://31.129.108.187:5173 (set VITE_API_URL in .env).
+- cp .env.example .env; edit pass/IP.
+- ./setup_and_run.sh.
+- Test: Upload sample.txt (nums), see analysis.
 
-### Git Push
-- .env in .gitignore — secrets safe.
-- For prod: Use PM2/systemd for nohup processes.
-
-### Tech
-- Backend: FastAPI + PostgreSQL + NIST.
-- Frontend: SvelteKit + Chart.js.
-- Env: Python 3, Node 18+.
+### Демо
+- Генерация: /generate/chaotic.
+- Upload: Frontend file input → таблица NIST/compare.
