@@ -1,10 +1,9 @@
 <script lang="ts">
     import { createEventDispatcher } from 'svelte';
-    import type PageData from './Analysis.svelte';
     import { api } from '$lib/services/api';
 
     const dispatch = createEventDispatcher();
-    let fileInput: HTMLInputElement;
+    let fileInput: HTMLInputElement = null;
     let loading = false;
     let error = '';
 
@@ -16,7 +15,7 @@
         loading = true;
         error = '';
         try {
-            const result: PageData = await api.analyze(fileInput.files[0]);
+            const result = await api.analyze(fileInput.files[0]);
             dispatch('analyzed', result);
         } catch (e: any) {
             error = e.message;
@@ -26,13 +25,16 @@
     };
 </script>
 
-<div class="p-4 border rounded dark:border-gray-600">
-    <h3 class="font-bold mb-2">Загрузка внешней последовательности</h3>
-    <input bind:this={fileInput} type="file" accept=".txt,.csv" class="mb-2" />
-    <button on:click={handleUpload} disabled={loading} class="px-4 py-2 bg-green-600 text-white rounded">
+<div class="source-buttons">
+    <label for="file-upload" id="file-name" class="btn btn-primary">
+        {#if error}
+            <p class="text-red-500 mt-2">{error}</p>
+        {:else}
+            Загрузить файл
+        {/if}
+    </label>
+    <input bind:this={fileInput} style="visibility: hidden; display: none" id="file-upload" type="file" accept=".txt,.csv" />
+    <button style="border: none; outline: none;" on:click={handleUpload} disabled={loading} class="btn btn-success">
         {loading ? 'Анализ...' : 'Анализировать'}
     </button>
-    {#if error}
-        <p class="text-red-500 mt-2">{error}</p>
-    {/if}
 </div>
